@@ -1,0 +1,30 @@
+{
+  "info": {
+    "name": "AI Gateway API",
+    "description": "## Overview\n\nThe gateway routes every inference request to the next eligible configured route. The client does not choose a model. The selected provider and upstream model come from the server configuration and are visible in the response model field.\n\n## Execution order\n\n1. Create an account.\n2. Create a provider for that account.\n3. Create an API key for that provider.\n4. Create one or more models for the key.\n5. Copy response IDs into collection variables.\n6. Call Inference.\n\n## Inference request\n\n`POST /v1/inference` accepts JSON with `messages` (required array) and `stream` (optional boolean). It intentionally has no `model` field. The server selects the configured model, key, provider, and account using round-robin routing.\n\nAPI keys are accepted only on create/update requests and are never returned; use a local variable for real secrets and do not commit them.\n\n## Availability\n\nA rate-limited key is suspended for one hour and removed from routing. PostgreSQL is authoritative; Redis is the shared routing cache.",
+    "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"
+  },
+  "variable": [
+    { "key": "baseUrl", "value": "http://localhost:8080" },
+    { "key": "accountId", "value": "" },
+    { "key": "providerId", "value": "" },
+    { "key": "keyId", "value": "" },
+    { "key": "modelId", "value": "" }
+  ],
+  "item": [
+    { "name": "01 - Health", "request": { "method": "GET", "url": "{{baseUrl}}/healthz" } },
+    { "name": "02 - Readiness", "request": { "method": "GET", "url": "{{baseUrl}}/readyz" } },
+    { "name": "03 - Effective routes", "request": { "method": "GET", "url": "{{baseUrl}}/admin/v1/routes" } },
+    { "name": "04 - Create account", "event": [{ "listen": "test", "script": { "exec": ["pm.collectionVariables.set('accountId', pm.response.json().ID);"] } }], "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"email\": \"gateway@example.com\",\n  \"enabled\": true\n}" }, "url": "{{baseUrl}}/admin/v1/accounts" } },
+    { "name": "05 - Create provider", "event": [{ "listen": "test", "script": { "exec": ["pm.collectionVariables.set('providerId', pm.response.json().ID);"] } }], "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"account_id\": \"{{accountId}}\",\n  \"name\": \"openai-compatible\",\n  \"base_url\": \"mock://smoke-test\",\n  \"adapter_type\": \"openai_compatible\"\n}" }, "url": "{{baseUrl}}/admin/v1/providers" } },
+    { "name": "06 - Create API key", "event": [{ "listen": "test", "script": { "exec": ["pm.collectionVariables.set('keyId', pm.response.json().ID);", "pm.test('secret is not returned', function () { pm.expect(pm.response.text()).not.to.include('REPLACE_LOCALLY'); });"] } }], "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"provider_id\": \"{{providerId}}\",\n  \"label\": \"primary\",\n  \"secret\": \"REPLACE_LOCALLY_AND_DO_NOT_COMMIT\"\n}" }, "url": "{{baseUrl}}/admin/v1/keys" } },
+    { "name": "07 - Create model configuration", "event": [{ "listen": "test", "script": { "exec": ["pm.collectionVariables.set('modelId', pm.response.json().ID);"] } }], "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"api_key_id\": \"{{keyId}}\",\n  \"logical_name\": \"default\",\n  \"upstream_model\": \"provider-model-from-config\"\n}" }, "url": "{{baseUrl}}/admin/v1/models" } },
+    { "name": "08 - Inference (server selects model)", "request": { "method": "POST", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"messages\": [\n    {\"role\": \"user\", \"content\": \"Explain round-robin routing in one sentence.\"}\n  ],\n  \"stream\": false\n}" }, "url": "{{baseUrl}}/v1/inference" } },
+    { "name": "09 - List accounts", "request": { "method": "GET", "url": "{{baseUrl}}/admin/v1/accounts" } },
+    { "name": "10 - List providers", "request": { "method": "GET", "url": "{{baseUrl}}/admin/v1/providers" } },
+    { "name": "11 - List keys (masked)", "request": { "method": "GET", "url": "{{baseUrl}}/admin/v1/keys" } },
+    { "name": "12 - List models with usage counts", "request": { "method": "GET", "url": "{{baseUrl}}/admin/v1/models" } },
+    { "name": "13 - Update model", "request": { "method": "PATCH", "header": [{ "key": "Content-Type", "value": "application/json" }], "body": { "mode": "raw", "raw": "{\n  \"enabled\": true\n}" }, "url": "{{baseUrl}}/admin/v1/models/{{modelId}}" } },
+    { "name": "14 - Disable model", "request": { "method": "DELETE", "url": "{{baseUrl}}/admin/v1/models/{{modelId}}" } }
+  ]
+}

@@ -1,0 +1,16 @@
+build a Round-Robin based external AI API caller with these specs:
+1-Keys are stored according to the following:
+Gmail Account --> Providers-->keys-->each key can call multiple models(one is chosen to be called and can be switched via admin)
+2-when a user fetch that endpoint,the key,model in the usage order is used and then it goes to the next,if any error happened it is logged in log file to explain where is the problem(account-provider-key-model) and if that error is rate limit , 1 hour sleep is given to that key
+3-I want CRUD Operations API for accounts,providers,keys(usage count),models(usage count) 
+use this flow :
+PostgreSQL (single source of truth)
+    ↓ (cached reads)
+Redis (provider list, model metadata)
+    ↓ (hot-cache fallback)
+In-memory config (for immediate routing)
+4-when an error leads to a sleep occurs , the cache is updated
+5-make the endpoints exposed with no auth
+6-use best golang optimized code for fastest performance
+7-ensure that the gateway can call any provider(compatibility)
+8-logging is important and daily log files are given

@@ -1,0 +1,78 @@
+name: Deploy AI Gateway
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+concurrency:
+  group: ai-gateway-production
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Test
+        run: go test ./...
+
+      - name: Build
+        run: go build -o gateway ./cmd/gateway
+
+  deploy:
+    needs: test
+    runs-on: ubuntu-latest
+    environment: production
+    steps:
+      - name: Configure SSH
+        shell: bash
+        env:
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+        run: |
+          set -euo pipefail
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan -H -p "$VPS_PORT" "$VPS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Deploy to VPS
+        shell: bash
+        env:
+          APP_DIR: ${{ secrets.APP_DIR }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          ssh -i ~/.ssh/id_ed25519 -p "$VPS_PORT" \
+            "$VPS_USER@$VPS_HOST" bash -s -- "$APP_DIR" <<'REMOTE_SCRIPT'
+          set -euo pipefail
+
+          app_dir="$1"
+          cd -- "$app_dir"
+
+          git fetch origin main
+          git reset --hard origin/main
+          go mod download
+          go test ./...
+          go build -o gateway.new ./cmd/gateway
+          mv gateway.new gateway
+
+          sudo -n systemctl restart ai-gateway
+          sudo -n systemctl is-active --quiet ai-gateway
+          REMOTE_SCRIPT
