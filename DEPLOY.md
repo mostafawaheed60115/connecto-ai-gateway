@@ -30,4 +30,9 @@ if `command -v systemctl` reports a different path):
 mahmoud ALL=(root) NOPASSWD: /usr/bin/systemctl restart ai-gateway, /usr/bin/systemctl is-active --quiet ai-gateway
 ```
 
+GitHub Actions runs the tests and creates a stripped Linux AMD64 binary on the
+hosted runner. It uploads that artifact to the VPS, replaces the executable
+atomically, restarts the service, and requires `/healthz` to return successfully.
+The VPS therefore does not spend CPU and memory compiling the application.
+
 The service listens on `0.0.0.0:4173` when `ADDR=0.0.0.0:4173` is set. PostgreSQL contains the accounts, providers, keys, and models; no key/model files are required. Daily logs are written under the configured application directory.

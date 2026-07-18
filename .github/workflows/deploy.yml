@@ -30,13 +30,30 @@ jobs:
         run: go test ./...
 
       - name: Build
-        run: go build -o gateway ./cmd/gateway
+        env:
+          CGO_ENABLED: "0"
+          GOOS: linux
+          GOARCH: amd64
+        run: go build -trimpath -ldflags="-s -w" -o gateway ./cmd/gateway
+
+      - name: Upload deployment binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-gateway-linux-amd64
+          path: gateway
+          if-no-files-found: error
+          retention-days: 7
 
   deploy:
     needs: test
     runs-on: ubuntu-latest
     environment: production
     steps:
+      - name: Download deployment binary
+        uses: actions/download-artifact@v4
+        with:
+          name: ai-gateway-linux-amd64
+
       - name: Configure SSH
         shell: bash
         env:
@@ -49,6 +66,18 @@ jobs:
           printf '%s\n' "$SSH_PRIVATE_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H -p "$VPS_PORT" "$VPS_HOST" >> ~/.ssh/known_hosts
+
+      - name: Upload binary to VPS
+        shell: bash
+        env:
+          APP_DIR: ${{ secrets.APP_DIR }}
+          VPS_HOST: ${{ secrets.VPS_HOST }}
+          VPS_PORT: ${{ secrets.VPS_PORT }}
+          VPS_USER: ${{ secrets.VPS_USER }}
+        run: |
+          set -euo pipefail
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" gateway \
+            "$VPS_USER@$VPS_HOST:$APP_DIR/gateway.new"
 
       - name: Deploy to VPS
         shell: bash
@@ -68,11 +97,20 @@ jobs:
 
           git fetch origin main
           git reset --hard origin/main
-          go mod download
-          go test ./...
-          go build -o gateway.new ./cmd/gateway
+          chmod 755 gateway.new
           mv gateway.new gateway
 
           sudo -n systemctl restart ai-gateway
           sudo -n systemctl is-active --quiet ai-gateway
+
+          for attempt in 1 2 3 4 5; do
+            if curl --fail --silent --show-error --max-time 5 \
+              http://127.0.0.1:4173/healthz > /dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+
+          echo "AI Gateway health check failed after restart." >&2
+          exit 1
           REMOTE_SCRIPT
