@@ -1,3 +1,6 @@
 logs/
 .env
 *.secret
+gateway
+gateway.new
+gateway.exe
