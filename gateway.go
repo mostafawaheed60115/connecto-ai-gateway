@@ -41,16 +41,16 @@ type Store struct {
 	models    map[string]Model
 }
 type App struct {
-	store       *Store
-	snapshot    atomic.Pointer[routing.Snapshot]
-	logger      *slog.Logger
-	client      *http.Client
-	accessToken string
-	origins     map[string]struct{}
-	requestSeq  atomic.Uint64
-	rrMu        sync.Mutex
-	db          *sql.DB
-	redis       *redis.Client
+	store          *Store
+	snapshot       atomic.Pointer[routing.Snapshot]
+	logger         *slog.Logger
+	client         *http.Client
+	accessPassword string
+	origins        map[string]struct{}
+	requestSeq     atomic.Uint64
+	rrMu           sync.Mutex
+	db             *sql.DB
+	redis          *redis.Client
 }
 
 const apiKeyErrorCooldown = 30 * time.Minute
@@ -695,7 +695,7 @@ func (a *App) applyCORS(w http.ResponseWriter, r *http.Request) bool {
 	}
 	w.Header().Set("Access-Control-Allow-Origin", origin)
 	w.Header().Set("Access-Control-Allow-Credentials", "true")
-	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, X-Gateway-Password, X-Request-ID")
 	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
 	w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
 	w.Header().Add("Vary", "Origin")
@@ -703,15 +703,12 @@ func (a *App) applyCORS(w http.ResponseWriter, r *http.Request) bool {
 }
 
 func (a *App) authorized(r *http.Request) bool {
-	if a.accessToken == "" {
+	if a.accessPassword == "" {
 		return true
 	}
-	candidate := strings.TrimSpace(r.Header.Get("Authorization"))
-	if len(candidate) >= len("Bearer ") && strings.EqualFold(candidate[:len("Bearer ")], "Bearer ") {
-		candidate = strings.TrimSpace(candidate[len("Bearer "):])
-	}
-	return len(candidate) == len(a.accessToken) &&
-		subtle.ConstantTimeCompare([]byte(candidate), []byte(a.accessToken)) == 1
+	candidate := r.Header.Get("X-Gateway-Password")
+	return len(candidate) == len(a.accessPassword) &&
+		subtle.ConstantTimeCompare([]byte(candidate), []byte(a.accessPassword)) == 1
 }
 
 func protectedPath(path string) bool {
@@ -738,7 +735,7 @@ func (a *App) handler(w http.ResponseWriter, r *http.Request) {
 	if protectedPath(p) && !a.authorized(r) {
 		a.logger.Warn("unauthorized gateway request", "request_id", requestID, "method", r.Method, "path", p)
 		jsonWrite(w, http.StatusUnauthorized, map[string]any{
-			"error":      map[string]string{"code": "unauthorized", "message": "a valid gateway access token is required"},
+			"error":      map[string]string{"code": "unauthorized", "message": "a valid gateway password is required"},
 			"request_id": requestID,
 		})
 		return
@@ -1162,11 +1159,11 @@ func Run() {
 	defer daily.Close()
 	logger := slog.New(slog.NewJSONHandler(logging.Multi(os.Stdout, daily), &slog.HandlerOptions{Level: level}))
 	app := &App{
-		store:       newStore(),
-		logger:      logger,
-		client:      newUpstreamClient(),
-		accessToken: strings.TrimSpace(os.Getenv("GATEWAY_ACCESS_TOKEN")),
-		origins:     parseAllowedOrigins(os.Getenv("CORS_ALLOWED_ORIGINS")),
+		store:          newStore(),
+		logger:         logger,
+		client:         newUpstreamClient(),
+		accessPassword: os.Getenv("GATEWAY_ACCESS_PASSWORD"),
+		origins:        parseAllowedOrigins(os.Getenv("CORS_ALLOWED_ORIGINS")),
 	}
 	app.db, app.redis = connectBackend(logger)
 	loadFromPostgres(app)

@@ -12,10 +12,11 @@ Inference is exposed at `POST /v1/inference`. Clients send `messages` and option
 
 Configuration is loaded from `.env` in the working directory, or from `ENV_FILE`. Copy `.env.example` to `.env` and fill in the PostgreSQL/Redis credentials. The service no longer reads connection credentials from text files. If Redis is unreachable, PostgreSQL remains authoritative and the process serves its last in-memory snapshot while reporting the degraded dependency in logs.
 
-Set `GATEWAY_ACCESS_TOKEN` to require bearer authentication for management and
-inference endpoints. Health endpoints remain public. Browser clients must also
-be listed explicitly in the comma-separated `CORS_ALLOWED_ORIGINS` value;
-localhost Vite origins are allowed automatically for development.
+Set `GATEWAY_ACCESS_PASSWORD` to require password authentication for management
+and inference endpoints. Clients send it in the `X-Gateway-Password` header.
+Health endpoints remain public. Browser clients must also be listed explicitly
+in the comma-separated `CORS_ALLOWED_ORIGINS` value; localhost Vite origins are
+allowed automatically for development.
 
 Accounts, providers, API keys, and models are loaded from PostgreSQL at startup. No key or model inventory files are required.
 

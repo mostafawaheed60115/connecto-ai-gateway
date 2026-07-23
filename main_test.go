@@ -105,9 +105,9 @@ func TestAllEndpointsAndSecretMasking(t *testing.T) {
 	}
 }
 
-func TestProtectedEndpointsRequireTokenAndCORSAllowlist(t *testing.T) {
+func TestProtectedEndpointsRequirePasswordAndCORSAllowlist(t *testing.T) {
 	a := testApp()
-	a.accessToken = "test-access-token"
+	a.accessPassword = "test-password"
 	a.origins = parseAllowedOrigins("https://dashboard.example.com")
 	handler := http.HandlerFunc(a.handler)
 
@@ -121,7 +121,7 @@ func TestProtectedEndpointsRequireTokenAndCORSAllowlist(t *testing.T) {
 		t.Fatalf("public health status = %d, want %d", response.Code, http.StatusOK)
 	}
 
-	authorized := map[string]string{"Authorization": "Bearer test-access-token"}
+	authorized := map[string]string{"X-Gateway-Password": "test-password"}
 	if response := callWithHeaders(t, handler, http.MethodGet, "/admin/v1/routes", nil, authorized); response.Code != http.StatusOK {
 		t.Fatalf("authorized admin status = %d, want %d", response.Code, http.StatusOK)
 	}
