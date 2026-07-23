@@ -186,7 +186,7 @@ func TestRefreshNormalizesOpenRouterAndGeminiModels(t *testing.T) {
 	}
 	a.store.models["model_gemini"] = Model{
 		ID: "model_gemini", APIKeyID: "key_gemini",
-		LogicalName: "gemini-2.0-flash", UpstreamModel: "gemini-2.0-flash", Enabled: true,
+		LogicalName: "gemini-2.5-flash-lite", UpstreamModel: "gemini-2.5-flash-lite", Enabled: true,
 	}
 
 	a.refresh()

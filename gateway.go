@@ -56,7 +56,7 @@ type App struct {
 const (
 	apiKeyErrorCooldown = 30 * time.Minute
 	openRouterFreeModel = "openrouter/free"
-	geminiLiteModel     = "gemini-2.5-flash-lite"
+	geminiLiteModel     = "gemini-3.1-flash-lite"
 )
 
 func now() time.Time                    { return time.Now().UTC() }
