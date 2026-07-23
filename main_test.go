@@ -28,6 +28,23 @@ func call(t *testing.T, h http.Handler, method, path string, body any) (int, map
 	return w.Code, out
 }
 
+func callWithHeaders(t *testing.T, h http.Handler, method, path string, body any, headers map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	var payload bytes.Buffer
+	if body != nil {
+		if err := json.NewEncoder(&payload).Encode(body); err != nil {
+			t.Fatal(err)
+		}
+	}
+	request := httptest.NewRequest(method, path, &payload)
+	for name, value := range headers {
+		request.Header.Set(name, value)
+	}
+	response := httptest.NewRecorder()
+	h.ServeHTTP(response, request)
+	return response
+}
+
 func TestAllEndpointsAndSecretMasking(t *testing.T) {
 	a := testApp()
 	h := http.HandlerFunc(a.handler)
@@ -85,6 +102,47 @@ func TestAllEndpointsAndSecretMasking(t *testing.T) {
 	}
 	if code, _ = call(t, h, "POST", "/v1/inference", map[string]any{"messages": []any{"after disable"}}); code != 503 {
 		t.Fatal("disabled route", code)
+	}
+}
+
+func TestProtectedEndpointsRequireTokenAndCORSAllowlist(t *testing.T) {
+	a := testApp()
+	a.accessToken = "test-access-token"
+	a.origins = parseAllowedOrigins("https://dashboard.example.com")
+	handler := http.HandlerFunc(a.handler)
+
+	if response := callWithHeaders(t, handler, http.MethodGet, "/admin/v1/routes", nil, nil); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated admin status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+	if response := callWithHeaders(t, handler, http.MethodPost, "/v1/inference", map[string]any{"messages": []any{"test"}}, nil); response.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated inference status = %d, want %d", response.Code, http.StatusUnauthorized)
+	}
+	if response := callWithHeaders(t, handler, http.MethodGet, "/healthz", nil, nil); response.Code != http.StatusOK {
+		t.Fatalf("public health status = %d, want %d", response.Code, http.StatusOK)
+	}
+
+	authorized := map[string]string{"Authorization": "Bearer test-access-token"}
+	if response := callWithHeaders(t, handler, http.MethodGet, "/admin/v1/routes", nil, authorized); response.Code != http.StatusOK {
+		t.Fatalf("authorized admin status = %d, want %d", response.Code, http.StatusOK)
+	}
+
+	allowedPreflight := callWithHeaders(t, handler, http.MethodOptions, "/admin/v1/routes", nil, map[string]string{
+		"Origin":                        "https://dashboard.example.com",
+		"Access-Control-Request-Method": http.MethodGet,
+	})
+	if allowedPreflight.Code != http.StatusNoContent {
+		t.Fatalf("allowed preflight status = %d, want %d", allowedPreflight.Code, http.StatusNoContent)
+	}
+	if got := allowedPreflight.Header().Get("Access-Control-Allow-Origin"); got != "https://dashboard.example.com" {
+		t.Fatalf("allow origin = %q", got)
+	}
+
+	blockedPreflight := callWithHeaders(t, handler, http.MethodOptions, "/admin/v1/routes", nil, map[string]string{
+		"Origin":                        "https://attacker.example.com",
+		"Access-Control-Request-Method": http.MethodGet,
+	})
+	if blockedPreflight.Code != http.StatusForbidden {
+		t.Fatalf("blocked preflight status = %d, want %d", blockedPreflight.Code, http.StatusForbidden)
 	}
 }
 

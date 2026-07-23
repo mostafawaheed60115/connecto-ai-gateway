@@ -3,6 +3,7 @@ package gateway
 import (
 	"context"
 	"crypto/sha256"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/hex"
 	"encoding/json"
@@ -40,13 +41,16 @@ type Store struct {
 	models    map[string]Model
 }
 type App struct {
-	store      *Store
-	snapshot   atomic.Pointer[routing.Snapshot]
-	logger     *slog.Logger
-	requestSeq atomic.Uint64
-	rrMu       sync.Mutex
-	db         *sql.DB
-	redis      *redis.Client
+	store       *Store
+	snapshot    atomic.Pointer[routing.Snapshot]
+	logger      *slog.Logger
+	client      *http.Client
+	accessToken string
+	origins     map[string]struct{}
+	requestSeq  atomic.Uint64
+	rrMu        sync.Mutex
+	db          *sql.DB
+	redis       *redis.Client
 }
 
 const apiKeyErrorCooldown = 30 * time.Minute
@@ -197,7 +201,11 @@ func (a *App) routes(w http.ResponseWriter) {
 			}
 		}
 	}
-	jsonWrite(w, 200, map[string]any{"version": s.Version, "routes": out})
+	version := uint64(0)
+	if s != nil {
+		version = s.Version
+	}
+	jsonWrite(w, 200, map[string]any{"version": version, "routes": out})
 }
 
 type accountInput struct {
@@ -621,7 +629,11 @@ func (a *App) proxy(w http.ResponseWriter, r *http.Request) {
 		secret = strings.TrimSpace(secret[len("key:"):])
 	}
 	up.Header.Set("Authorization", "Bearer "+secret)
-	resp, err := http.DefaultClient.Do(up)
+	client := a.client
+	if client == nil {
+		client = http.DefaultClient
+	}
+	resp, err := client.Do(up)
 	if err != nil {
 		a.cooldownKey(route, reqID, "network_error", 0, err)
 		jsonWrite(w, 502, map[string]string{"error": "upstream unavailable"})
@@ -659,9 +671,78 @@ func (a *App) reloadRouting(w http.ResponseWriter, r *http.Request) {
 	jsonWrite(w, http.StatusOK, map[string]any{"status": "reloaded", "version": version, "routes": routes})
 }
 
+func parseAllowedOrigins(value string) map[string]struct{} {
+	origins := map[string]struct{}{
+		"http://127.0.0.1:5173": {},
+		"http://localhost:5173": {},
+	}
+	for _, origin := range strings.Split(value, ",") {
+		origin = strings.TrimSpace(strings.TrimRight(origin, "/"))
+		if origin != "" {
+			origins[origin] = struct{}{}
+		}
+	}
+	return origins
+}
+
+func (a *App) applyCORS(w http.ResponseWriter, r *http.Request) bool {
+	origin := strings.TrimRight(strings.TrimSpace(r.Header.Get("Origin")), "/")
+	if origin == "" {
+		return true
+	}
+	if _, allowed := a.origins[origin]; !allowed {
+		return false
+	}
+	w.Header().Set("Access-Control-Allow-Origin", origin)
+	w.Header().Set("Access-Control-Allow-Credentials", "true")
+	w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Request-ID")
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PATCH, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Expose-Headers", "X-Request-ID")
+	w.Header().Add("Vary", "Origin")
+	return true
+}
+
+func (a *App) authorized(r *http.Request) bool {
+	if a.accessToken == "" {
+		return true
+	}
+	candidate := strings.TrimSpace(r.Header.Get("Authorization"))
+	if len(candidate) >= len("Bearer ") && strings.EqualFold(candidate[:len("Bearer ")], "Bearer ") {
+		candidate = strings.TrimSpace(candidate[len("Bearer "):])
+	}
+	return len(candidate) == len(a.accessToken) &&
+		subtle.ConstantTimeCompare([]byte(candidate), []byte(a.accessToken)) == 1
+}
+
+func protectedPath(path string) bool {
+	return strings.HasPrefix(path, "/admin/v1") || path == "/v1/inference"
+}
+
 func (a *App) handler(w http.ResponseWriter, r *http.Request) {
-	w.Header().Set("X-Request-ID", a.requestID(r))
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	if !a.applyCORS(w, r) && r.Method == http.MethodOptions {
+		jsonWrite(w, http.StatusForbidden, map[string]string{"error": "origin is not allowed"})
+		return
+	}
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+
+	requestID := a.requestID(r)
+	r.Header.Set("X-Request-ID", requestID)
+	w.Header().Set("X-Request-ID", requestID)
 	p := strings.TrimSuffix(r.URL.Path, "/")
+	if protectedPath(p) && !a.authorized(r) {
+		a.logger.Warn("unauthorized gateway request", "request_id", requestID, "method", r.Method, "path", p)
+		jsonWrite(w, http.StatusUnauthorized, map[string]any{
+			"error":      map[string]string{"code": "unauthorized", "message": "a valid gateway access token is required"},
+			"request_id": requestID,
+		})
+		return
+	}
 	switch {
 	case p == "/healthz":
 		jsonWrite(w, 200, map[string]string{"status": "ok"})
@@ -983,6 +1064,16 @@ func connectBackend(logger *slog.Logger) (*sql.DB, *redis.Client) {
 	return db, rc
 }
 
+func newUpstreamClient() *http.Client {
+	transport := http.DefaultTransport.(*http.Transport).Clone()
+	transport.MaxIdleConns = 100
+	transport.MaxIdleConnsPerHost = 20
+	transport.MaxConnsPerHost = 50
+	transport.IdleConnTimeout = 90 * time.Second
+	transport.ResponseHeaderTimeout = 60 * time.Second
+	return &http.Client{Transport: transport}
+}
+
 func loadFromPostgres(a *App) {
 	if a.db == nil {
 		return
@@ -1070,7 +1161,13 @@ func Run() {
 	}
 	defer daily.Close()
 	logger := slog.New(slog.NewJSONHandler(logging.Multi(os.Stdout, daily), &slog.HandlerOptions{Level: level}))
-	app := &App{store: newStore(), logger: logger}
+	app := &App{
+		store:       newStore(),
+		logger:      logger,
+		client:      newUpstreamClient(),
+		accessToken: strings.TrimSpace(os.Getenv("GATEWAY_ACCESS_TOKEN")),
+		origins:     parseAllowedOrigins(os.Getenv("CORS_ALLOWED_ORIGINS")),
+	}
 	app.db, app.redis = connectBackend(logger)
 	loadFromPostgres(app)
 	if routes := bootstrapBynaraAccounts(app); routes > 0 {
@@ -1082,7 +1179,16 @@ func Run() {
 		addr = ":8080"
 	}
 	logger.Info("gateway listening", "addr", addr)
-	if err := http.ListenAndServe(addr, http.HandlerFunc(app.handler)); err != nil {
+	server := &http.Server{
+		Addr:              addr,
+		Handler:           http.HandlerFunc(app.handler),
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      90 * time.Second,
+		IdleTimeout:       120 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+	if err := server.ListenAndServe(); err != nil {
 		logger.Error("server stopped", "error", err)
 		os.Exit(1)
 	}
