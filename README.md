@@ -15,7 +15,8 @@ Configuration is loaded from `.env` in the working directory, or from `ENV_FILE`
 Set `GATEWAY_ACCESS_PASSWORD` to require password authentication for management
 and inference endpoints. Clients send it in the `X-Gateway-Password` header.
 Health endpoints remain public. Browser clients must also be listed explicitly
-in the comma-separated `CORS_ALLOWED_ORIGINS` value; localhost Vite origins are
+in the comma-separated `CORS_ALLOWED_ORIGINS` value. The production dashboard
+at `https://aigw.connecto-me.com` and localhost Vite origins are
 allowed automatically for development.
 
 Accounts, providers, API keys, and models are loaded from PostgreSQL at startup. No key or model inventory files are required.

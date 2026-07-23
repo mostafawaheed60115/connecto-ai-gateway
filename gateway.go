@@ -53,7 +53,11 @@ type App struct {
 	redis          *redis.Client
 }
 
-const apiKeyErrorCooldown = 30 * time.Minute
+const (
+	apiKeyErrorCooldown = 30 * time.Minute
+	openRouterFreeModel = "openrouter/free"
+	geminiLiteModel     = "gemini-2.5-flash-lite"
+)
 
 func now() time.Time                    { return time.Now().UTC() }
 func id(prefix string, n uint64) string { return fmt.Sprintf("%s_%d", prefix, n) }
@@ -104,7 +108,47 @@ func (s *Store) rebuild() *routing.Snapshot {
 	}
 	return routing.Build(routes, uint64(time.Now().UnixNano()))
 }
-func (a *App) refresh() { a.snapshot.Store(a.store.rebuild()); a.syncPersistence() }
+
+// normalizeProviderModels keeps every key on the approved upstream model for
+// providers whose model inventories can change or disappear without notice.
+// It runs before every snapshot rebuild, so imports and admin edits follow the
+// same routing policy and the normalized values are persisted to PostgreSQL.
+func (a *App) normalizeProviderModels() {
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+
+	for modelID, model := range a.store.models {
+		key, ok := a.store.keys[model.APIKeyID]
+		if !ok {
+			continue
+		}
+		provider, ok := a.store.providers[key.ProviderID]
+		if !ok {
+			continue
+		}
+
+		var canonicalModel string
+		providerName := strings.ToLower(strings.TrimSpace(provider.Name))
+		switch {
+		case strings.Contains(providerName, "openrouter"):
+			canonicalModel = openRouterFreeModel
+		case strings.Contains(providerName, "gemini"):
+			canonicalModel = geminiLiteModel
+		default:
+			continue
+		}
+
+		model.LogicalName = canonicalModel
+		model.UpstreamModel = canonicalModel
+		a.store.models[modelID] = model
+	}
+}
+
+func (a *App) refresh() {
+	a.normalizeProviderModels()
+	a.snapshot.Store(a.store.rebuild())
+	a.syncPersistence()
+}
 
 func (a *App) syncPersistence() {
 	if a.db != nil {
@@ -673,8 +717,9 @@ func (a *App) reloadRouting(w http.ResponseWriter, r *http.Request) {
 
 func parseAllowedOrigins(value string) map[string]struct{} {
 	origins := map[string]struct{}{
-		"http://127.0.0.1:5173": {},
-		"http://localhost:5173": {},
+		"http://127.0.0.1:5173":        {},
+		"http://localhost:5173":        {},
+		"https://aigw.connecto-me.com": {},
 	}
 	for _, origin := range strings.Split(value, ",") {
 		origin = strings.TrimSpace(strings.TrimRight(origin, "/"))

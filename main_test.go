@@ -137,12 +137,67 @@ func TestProtectedEndpointsRequirePasswordAndCORSAllowlist(t *testing.T) {
 		t.Fatalf("allow origin = %q", got)
 	}
 
+	productionPreflight := callWithHeaders(t, handler, http.MethodOptions, "/admin/v1/routes", nil, map[string]string{
+		"Origin":                         "https://aigw.connecto-me.com",
+		"Access-Control-Request-Method":  http.MethodGet,
+		"Access-Control-Request-Headers": "content-type,x-gateway-password",
+	})
+	if productionPreflight.Code != http.StatusNoContent {
+		t.Fatalf("production preflight status = %d, want %d", productionPreflight.Code, http.StatusNoContent)
+	}
+	if got := productionPreflight.Header().Get("Access-Control-Allow-Origin"); got != "https://aigw.connecto-me.com" {
+		t.Fatalf("production allow origin = %q", got)
+	}
+
 	blockedPreflight := callWithHeaders(t, handler, http.MethodOptions, "/admin/v1/routes", nil, map[string]string{
 		"Origin":                        "https://attacker.example.com",
 		"Access-Control-Request-Method": http.MethodGet,
 	})
 	if blockedPreflight.Code != http.StatusForbidden {
 		t.Fatalf("blocked preflight status = %d, want %d", blockedPreflight.Code, http.StatusForbidden)
+	}
+}
+
+func TestRefreshNormalizesOpenRouterAndGeminiModels(t *testing.T) {
+	a := testApp()
+	created := now()
+	a.store.accounts["acct_models"] = Account{
+		ID: "acct_models", Email: "models@example.com", Enabled: true, CreatedAt: created,
+	}
+	a.store.providers["prov_openrouter"] = Provider{
+		ID: "prov_openrouter", AccountID: "acct_models", Name: "OpenRouter",
+		BaseURL: "https://openrouter.ai/api/v1", AdapterType: "openai_compatible",
+		Enabled: true, CreatedAt: created,
+	}
+	a.store.providers["prov_gemini"] = Provider{
+		ID: "prov_gemini", AccountID: "acct_models", Name: "free-gemini",
+		BaseURL: "https://generativelanguage.googleapis.com", AdapterType: "openai_compatible",
+		Enabled: true, CreatedAt: created,
+	}
+	a.store.keys["key_openrouter"] = APIKey{
+		ID: "key_openrouter", ProviderID: "prov_openrouter", Enabled: true,
+	}
+	a.store.keys["key_gemini"] = APIKey{
+		ID: "key_gemini", ProviderID: "prov_gemini", Enabled: true,
+	}
+	a.store.models["model_openrouter"] = Model{
+		ID: "model_openrouter", APIKeyID: "key_openrouter",
+		LogicalName: "removed/free-model", UpstreamModel: "removed/free-model", Enabled: true,
+	}
+	a.store.models["model_gemini"] = Model{
+		ID: "model_gemini", APIKeyID: "key_gemini",
+		LogicalName: "gemini-2.0-flash", UpstreamModel: "gemini-2.0-flash", Enabled: true,
+	}
+
+	a.refresh()
+
+	openRouter := a.store.models["model_openrouter"]
+	if openRouter.LogicalName != openRouterFreeModel || openRouter.UpstreamModel != openRouterFreeModel {
+		t.Fatalf("OpenRouter model = %#v, want %q", openRouter, openRouterFreeModel)
+	}
+	gemini := a.store.models["model_gemini"]
+	if gemini.LogicalName != geminiLiteModel || gemini.UpstreamModel != geminiLiteModel {
+		t.Fatalf("Gemini model = %#v, want %q", gemini, geminiLiteModel)
 	}
 }
 
