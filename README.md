@@ -14,4 +14,14 @@ Configuration is loaded from `.env` in the working directory, or from `ENV_FILE`
 
 Accounts, providers, API keys, and models are loaded from PostgreSQL at startup. No key or model inventory files are required.
 
-Logs are written as daily JSON files outside the project by default (`../logs/`) using names such as `gateway-2026-07-13.log`. Override the directory with `LOG_DIR`. Logs are also written to stdout and never contain API-key secrets.
+The requested Bynara accounts are provisioned idempotently when
+`BYNARA_CONNECTO_API_KEY` and `BYNARA_SELLERS_API_KEY` are present in the
+environment. Both keys route `mistral-large` and `nemotron-3-ultra` through
+`https://router.bynara.id/v1`. Secrets remain environment-only.
+
+Any upstream network or HTTP error removes the selected API key from routing
+for 30 minutes. The error, key ID, and cooldown deadline are recorded without
+logging credentials. The key automatically becomes eligible again after the
+cooldown.
+
+Logs are written as daily JSON files outside the project by default (`../logs/`) using names such as `gateway-2026-07-13.log`. Override the directory with `LOG_DIR`. Logs are also written to stdout, never contain API-key secrets, and retain at most 14 UTC daily files.

@@ -21,6 +21,8 @@ Configure these GitHub repository secrets:
 - `VPS_USER`: `mahmoud`
 - `SSH_PRIVATE_KEY`: the complete private deployment key, including its header
   and footer
+- `BYNARA_CONNECTO_API_KEY`: the Bynara key for `connecto.meets@gmail.com`
+- `BYNARA_SELLERS_API_KEY`: the Bynara key for `sellers.connecto@gmail.com`
 
 The `mahmoud` user must be able to restart and inspect only this service without
 an interactive password. Add this with `sudo visudo` (adjust the systemctl path
@@ -32,7 +34,8 @@ mahmoud ALL=(root) NOPASSWD: /usr/bin/systemctl restart ai-gateway, /usr/bin/sys
 
 GitHub Actions runs the tests and creates a stripped Linux AMD64 binary on the
 hosted runner. It uploads that artifact to the VPS, replaces the executable
-atomically, restarts the service, and requires `/healthz` to return successfully.
-The VPS therefore does not spend CPU and memory compiling the application.
+atomically, securely merges the Bynara secrets into the VPS-only `.env`, restarts
+the service, and requires `/healthz` to return successfully. The VPS therefore
+does not spend CPU and memory compiling the application.
 
 The service listens on `0.0.0.0:4173` when `ADDR=0.0.0.0:4173` is set. PostgreSQL contains the accounts, providers, keys, and models; no key/model files are required. Daily logs are written under the configured application directory.

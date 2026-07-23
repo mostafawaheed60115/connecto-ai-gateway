@@ -67,17 +67,28 @@ jobs:
           chmod 600 ~/.ssh/id_ed25519
           ssh-keyscan -H -p "$VPS_PORT" "$VPS_HOST" >> ~/.ssh/known_hosts
 
-      - name: Upload binary to VPS
+      - name: Upload binary and Bynara configuration to VPS
         shell: bash
         env:
           APP_DIR: ${{ secrets.APP_DIR }}
+          BYNARA_CONNECTO_API_KEY: ${{ secrets.BYNARA_CONNECTO_API_KEY }}
+          BYNARA_SELLERS_API_KEY: ${{ secrets.BYNARA_SELLERS_API_KEY }}
           VPS_HOST: ${{ secrets.VPS_HOST }}
           VPS_PORT: ${{ secrets.VPS_PORT }}
           VPS_USER: ${{ secrets.VPS_USER }}
         run: |
           set -euo pipefail
+          test -n "$BYNARA_CONNECTO_API_KEY"
+          test -n "$BYNARA_SELLERS_API_KEY"
+
+          umask 077
+          printf 'BYNARA_CONNECTO_API_KEY=%s\nBYNARA_SELLERS_API_KEY=%s\n' \
+            "$BYNARA_CONNECTO_API_KEY" "$BYNARA_SELLERS_API_KEY" > bynara.env
+
           scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" gateway \
             "$VPS_USER@$VPS_HOST:$APP_DIR/gateway.new"
+          scp -i ~/.ssh/id_ed25519 -P "$VPS_PORT" bynara.env \
+            "$VPS_USER@$VPS_HOST:$APP_DIR/.bynara.env.new"
 
       - name: Deploy to VPS
         shell: bash
@@ -94,9 +105,23 @@ jobs:
 
           app_dir="$1"
           cd -- "$app_dir"
+          env_file="$app_dir/.env"
+          secret_file="$app_dir/.bynara.env.new"
 
           git fetch origin main
           git reset --hard origin/main
+
+          # Atomically merge the deployment secrets without exposing them in
+          # the repository or workflow output.
+          test -s "$secret_file"
+          touch "$env_file"
+          env_tmp="$(mktemp "$app_dir/.env.XXXXXX")"
+          awk '!/^BYNARA_(CONNECTO|SELLERS)_API_KEY=/' "$env_file" > "$env_tmp"
+          cat "$secret_file" >> "$env_tmp"
+          chmod 600 "$env_tmp"
+          mv "$env_tmp" "$env_file"
+          rm "$secret_file"
+
           chmod 755 gateway.new
           mv gateway.new gateway
 

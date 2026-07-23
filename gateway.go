@@ -49,6 +49,8 @@ type App struct {
 	redis      *redis.Client
 }
 
+const apiKeyErrorCooldown = 30 * time.Minute
+
 func now() time.Time                    { return time.Now().UTC() }
 func id(prefix string, n uint64) string { return fmt.Sprintf("%s_%d", prefix, n) }
 func fingerprint(secret string) string {
@@ -156,6 +158,7 @@ func (a *App) syncPersistence() {
 	}
 }
 func (a *App) selectRoute(model string) (Route, bool) {
+	a.reactivateExpiredKeys()
 	s := a.snapshot.Load()
 	if s == nil {
 		return Route{}, false
@@ -169,6 +172,7 @@ func (a *App) selectRoute(model string) (Route, bool) {
 
 // selectDefaultRoute selects the next eligible configured route globally.
 func (a *App) selectDefaultRoute() (Route, bool) {
+	a.reactivateExpiredKeys()
 	s := a.snapshot.Load()
 	if s == nil {
 		return Route{}, false
@@ -513,16 +517,62 @@ func (a *App) item(w http.ResponseWriter, r *http.Request, kind, entityID string
 	jsonWrite(w, 405, map[string]string{"error": "method not allowed"})
 }
 
-func (a *App) suspend(keyID string) {
-	until := now().Add(time.Hour)
+// reactivateExpiredKeys returns cooled-down keys to routing on the first
+// request after their suspension expires.
+func (a *App) reactivateExpiredKeys() {
+	currentTime := now()
+	reactivated := make([]string, 0)
 	a.store.mu.Lock()
-	if k, ok := a.store.keys[keyID]; ok {
-		k.SuspendedUntil = &until
-		a.store.keys[keyID] = k
+	for keyID, key := range a.store.keys {
+		if key.SuspendedUntil == nil || key.SuspendedUntil.After(currentTime) {
+			continue
+		}
+		key.SuspendedUntil = nil
+		a.store.keys[keyID] = key
+		reactivated = append(reactivated, keyID)
+	}
+	a.store.mu.Unlock()
+	if len(reactivated) == 0 {
+		return
+	}
+	a.refresh()
+	for _, keyID := range reactivated {
+		a.logger.Info("API key cooldown ended", "key_id", keyID)
+	}
+}
+
+// cooldownKey immediately removes a failing key from routing for 30 minutes.
+// Only stable internal identifiers are logged; credentials and fingerprints
+// are deliberately excluded.
+func (a *App) cooldownKey(route Route, requestID, errorType string, statusCode int, upstreamErr error) {
+	until := now().Add(apiKeyErrorCooldown)
+	a.store.mu.Lock()
+	if key, ok := a.store.keys[route.Key.ID]; ok {
+		key.SuspendedUntil = &until
+		a.store.keys[route.Key.ID] = key
 	}
 	a.store.mu.Unlock()
 	a.refresh()
+
+	attrs := []any{
+		"request_id", requestID,
+		"account", route.Account.ID,
+		"provider", route.Provider.Name,
+		"key_id", route.Key.ID,
+		"model", route.Model.LogicalName,
+		"error_type", errorType,
+		"cooldown_minutes", int(apiKeyErrorCooldown / time.Minute),
+		"suspended_until", until,
+	}
+	if statusCode != 0 {
+		attrs = append(attrs, "status_code", statusCode)
+	}
+	if upstreamErr != nil {
+		attrs = append(attrs, "error", upstreamErr.Error())
+	}
+	a.logger.Error("upstream API key error; cooldown started", attrs...)
 }
+
 func (a *App) proxy(w http.ResponseWriter, r *http.Request) {
 	reqID := a.requestID(r)
 	var in struct {
@@ -561,6 +611,7 @@ func (a *App) proxy(w http.ResponseWriter, r *http.Request) {
 	defer cancel()
 	up, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(route.Provider.BaseURL, "/")+"/chat/completions", strings.NewReader(string(b)))
 	if err != nil {
+		a.cooldownKey(route, reqID, "request_build_error", 0, err)
 		jsonWrite(w, 502, map[string]string{"error": "upstream request failed"})
 		return
 	}
@@ -572,12 +623,13 @@ func (a *App) proxy(w http.ResponseWriter, r *http.Request) {
 	up.Header.Set("Authorization", "Bearer "+secret)
 	resp, err := http.DefaultClient.Do(up)
 	if err != nil {
+		a.cooldownKey(route, reqID, "network_error", 0, err)
 		jsonWrite(w, 502, map[string]string{"error": "upstream unavailable"})
 		return
 	}
 	defer resp.Body.Close()
-	if resp.StatusCode == 429 {
-		a.suspend(route.Key.ID)
+	if resp.StatusCode >= http.StatusBadRequest {
+		a.cooldownKey(route, reqID, "http_error", resp.StatusCode, nil)
 	}
 	w.Header().Set("Content-Type", resp.Header.Get("Content-Type"))
 	w.WriteHeader(resp.StatusCode)
@@ -783,6 +835,105 @@ func importModels(a *App, path string) int {
 	return count
 }
 
+// bootstrapBynaraAccounts installs the requested Bynara routes when their
+// secrets are supplied through the process environment. Deterministic IDs make
+// startup idempotent and keep secrets out of source control.
+func bootstrapBynaraAccounts(a *App) int {
+	type accountSpec struct {
+		id        string
+		email     string
+		secretEnv string
+	}
+	specs := []accountSpec{
+		{id: "connecto", email: "connecto.meets@gmail.com", secretEnv: "BYNARA_CONNECTO_API_KEY"},
+		{id: "sellers", email: "sellers.connecto@gmail.com", secretEnv: "BYNARA_SELLERS_API_KEY"},
+	}
+	models := []string{"mistral-large", "nemotron-3-ultra"}
+	baseURL := strings.TrimSpace(os.Getenv("BYNARA_BASE_URL"))
+	if baseURL == "" {
+		baseURL = "https://router.bynara.id/v1"
+	}
+
+	configuredRoutes := 0
+	a.store.mu.Lock()
+	defer a.store.mu.Unlock()
+	for _, spec := range specs {
+		secret := strings.TrimSpace(os.Getenv(spec.secretEnv))
+		if secret == "" {
+			continue
+		}
+		accountID := "acct_bynara_" + spec.id
+		for existingID, existing := range a.store.accounts {
+			if strings.EqualFold(existing.Email, spec.email) {
+				accountID = existingID
+				break
+			}
+		}
+
+		account := a.store.accounts[accountID]
+		if account.CreatedAt.IsZero() {
+			account.CreatedAt = now()
+		}
+		account.ID, account.Email, account.Enabled = accountID, spec.email, true
+		a.store.accounts[accountID] = account
+
+		providerID := "prov_bynara_" + spec.id
+		for existingID, existing := range a.store.providers {
+			if existing.AccountID == accountID && strings.EqualFold(existing.Name, "bynara") {
+				providerID = existingID
+				break
+			}
+		}
+		provider := a.store.providers[providerID]
+		if provider.CreatedAt.IsZero() {
+			provider.CreatedAt = now()
+		}
+		provider.ID = providerID
+		provider.AccountID = accountID
+		provider.Name = "bynara"
+		provider.BaseURL = baseURL
+		provider.AdapterType = "openai_compatible"
+		provider.Enabled = true
+		a.store.providers[providerID] = provider
+
+		keyFingerprint := fingerprint(secret)
+		keyID := "key_bynara_" + spec.id
+		for existingID, existing := range a.store.keys {
+			if existing.ProviderID == providerID && existing.Fingerprint == keyFingerprint {
+				keyID = existingID
+				break
+			}
+		}
+		key := a.store.keys[keyID]
+		key.ID = keyID
+		key.ProviderID = providerID
+		key.Label = spec.id + "-bynara"
+		key.Secret = secret
+		key.Fingerprint = keyFingerprint
+		key.Enabled = true
+		a.store.keys[keyID] = key
+
+		for _, modelName := range models {
+			modelID := "model_bynara_" + spec.id + "_" + strings.ReplaceAll(modelName, "-", "_")
+			for existingID, existing := range a.store.models {
+				if existing.APIKeyID == keyID && strings.EqualFold(existing.LogicalName, modelName) {
+					modelID = existingID
+					break
+				}
+			}
+			model := a.store.models[modelID]
+			model.ID = modelID
+			model.APIKeyID = keyID
+			model.LogicalName = modelName
+			model.UpstreamModel = modelName
+			model.Enabled = true
+			a.store.models[modelID] = model
+			configuredRoutes++
+		}
+	}
+	return configuredRoutes
+}
+
 func connectBackend(logger *slog.Logger) (*sql.DB, *redis.Client) {
 	host := os.Getenv("DB_HOST")
 	if host == "" {
@@ -922,6 +1073,9 @@ func Run() {
 	app := &App{store: newStore(), logger: logger}
 	app.db, app.redis = connectBackend(logger)
 	loadFromPostgres(app)
+	if routes := bootstrapBynaraAccounts(app); routes > 0 {
+		logger.Info("Bynara environment routes configured", "routes", routes)
+	}
 	app.refresh()
 	addr := os.Getenv("ADDR")
 	if addr == "" {
